@@ -1,9 +1,12 @@
 """Pydantic request/response models. Validation lives here, not in routers or the worker."""
 
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ORMModel(BaseModel):
@@ -76,3 +79,88 @@ class CloudPage(BaseModel):
     next_cursor: str | None = Field(
         default=None, description="Pass as `cursor` to get the next page; null on the last page."
     )
+
+
+# --- jobs ----------------------------------------------------------------------------------
+# Validation of job parameters lives here and only here: the API rejects bad requests with a
+# 422, and the worker re-validates the stored JSONB with the same models before running.
+
+
+class SummarizeParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class DownsampleParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    leaf_size: float = Field(gt=0, description="Voxel edge length in the cloud's units.")
+
+
+class ClusterParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tolerance: float = Field(gt=0, description="Max gap between neighbours in one cluster.")
+    min_size: int = Field(default=20, ge=1)
+    max_size: int = Field(default=3000, ge=1)
+
+    @model_validator(mode="after")
+    def _sizes(self) -> ClusterParams:
+        if self.min_size > self.max_size:
+            raise ValueError("min_size must be <= max_size")
+        return self
+
+
+class SummarizeJobCreate(BaseModel):
+    type: Literal["summarize"]
+    params: SummarizeParams = Field(default_factory=SummarizeParams)
+
+
+class DownsampleJobCreate(BaseModel):
+    type: Literal["downsample"]
+    params: DownsampleParams
+
+
+class ClusterJobCreate(BaseModel):
+    type: Literal["cluster"]
+    params: ClusterParams
+
+
+# Unknown job types fail here, at the schema, never in the worker.
+JobCreate = Annotated[
+    SummarizeJobCreate | DownsampleJobCreate | ClusterJobCreate, Field(discriminator="type")
+]
+
+PARAM_MODELS: dict[str, type[BaseModel]] = {
+    "summarize": SummarizeParams,
+    "downsample": DownsampleParams,
+    "cluster": ClusterParams,
+}
+
+
+class ClusterOut(ORMModel):
+    index: int
+    size: int
+    bbox_min: list[float]
+    bbox_max: list[float]
+    centroid: list[float]
+
+
+class JobOut(ORMModel):
+    id: uuid.UUID
+    cloud_id: uuid.UUID
+    requested_by: uuid.UUID
+    type: str
+    params: dict[str, Any]
+    status: str
+    attempts: int
+    max_attempts: int
+    error: str | None
+    worker_id: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    result_cloud_id: uuid.UUID | None
+    clusters: list[ClusterOut] = []
+
+
+class JobPage(BaseModel):
+    items: list[JobOut]
+    next_cursor: str | None = None

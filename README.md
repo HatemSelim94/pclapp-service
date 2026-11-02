@@ -14,7 +14,7 @@ pytest against a real Postgres · ruff + mypy (strict) · Docker Compose · GitH
 |---|---|---|
 | M1 | skeleton, settings, schema + first migration, `/healthz`, users and API keys | done |
 | M2 | cloud upload / list / get / download / delete, keyset pagination, access rules | done |
-| M3 | jobs table, worker, `summarize` / `downsample` / `cluster` runners | — |
+| M3 | jobs API, worker with `FOR UPDATE SKIP LOCKED`, `summarize` / `downsample` / `cluster` runners | done |
 | M4 | shares and access rules | — |
 | M5 | Docker Compose + CI | — |
 
@@ -47,6 +47,15 @@ curl -s "localhost:8000/clouds?limit=20&q=sample" -H "Authorization: Bearer $KEY
 curl -s localhost:8000/clouds/<cloud-id>/download -H "Authorization: Bearer $KEY" -o scene.pcd
 ```
 
+```bash
+# start a worker (needs pclapp, i.e. PCL: pip install -e .[pcl]); then queue a job
+uv run pclapp-worker                     # or: python -m worker.main [--once]
+curl -s -X POST localhost:8000/clouds/<cloud-id>/jobs -H "Authorization: Bearer $KEY" \
+     -H "content-type: application/json" \
+     -d '{"type":"cluster","params":{"tolerance":0.15,"min_size":50,"max_size":5000}}'
+curl -s localhost:8000/jobs/<job-id> -H "Authorization: Bearer $KEY"
+```
+
 Interactive docs: `http://localhost:8000/docs`.
 
 ## API
@@ -64,6 +73,9 @@ Every endpoint except `/healthz` needs `Authorization: Bearer <key>`. Errors are
 | `GET` | `/clouds/{id}` | metadata incl. summary (once computed) and lineage |
 | `GET` | `/clouds/{id}/download` | the file |
 | `DELETE` | `/clouds/{id}` | owner only · soft delete |
+| `POST` | `/clouds/{id}/jobs` | owner/editor · `{"type": "downsample", "params": {"leaf_size": 0.05}}` or `{"type": "cluster", "params": {"tolerance", "min_size", "max_size"}}` → 202 |
+| `GET` | `/jobs/{id}` | status, attempts, timings, error, `result_cloud_id`, `clusters` |
+| `GET` | `/clouds/{id}/jobs?limit&cursor` | a cloud's jobs, newest first |
 | `GET` | `/healthz` | `{"db": "ok", "data_dir": "ok"}` or 503 |
 
 Access, as one table (`app/access.py`):
@@ -110,6 +122,48 @@ Two fixture tiers: most tests run inside one transaction that is rolled back (fa
 tests that need rows visible from other connections — two workers racing on `SKIP LOCKED`,
 the migration round-trip — commit for real and truncate afterwards.
 
+## Jobs and the worker
+
+Uploading a cloud enqueues a `summarize` job; clients enqueue `downsample` and `cluster`.
+Parameters are validated once, in Pydantic (`app/schemas.py`): an unknown type or a
+`leaf_size` of 0 is a 422 at the API, and the worker re-validates the stored JSONB with the
+same models before running, so a bad row can only ever fail, never crash the loop.
+
+The worker (`worker/main.py`) is a plain process polling the `jobs` table:
+
+```sql
+-- claim: one short transaction
+SELECT * FROM jobs WHERE status = 'queued'
+ORDER BY created_at, id LIMIT 1
+FOR UPDATE SKIP LOCKED;
+UPDATE jobs SET status = 'running', attempts = attempts + 1, worker_id = $1, started_at = now()
+WHERE id = $2;
+COMMIT;
+-- run the job with no transaction open (PCL may take seconds)
+-- finish: a second short transaction writes the result and status = 'done',
+-- or the error and status = 'queued' (attempts < max_attempts) or 'failed'
+```
+
+`FOR UPDATE` locks the row being taken; `SKIP LOCKED` lets a second worker step over it
+instead of waiting. N workers share the queue with no coordinator and nothing is claimed
+twice — `tests/test_worker.py` runs two workers in threads over twenty jobs and asserts
+`attempts == 1` on every one. SIGTERM finishes the job in hand, then exits.
+
+| job | does | writes |
+|---|---|---|
+| `summarize` | `pclapp.load(...).summary()` | `point_count`, `bbox_min/max`, `centroid` on the cloud row |
+| `downsample` | `pclapp.voxel_downsample(cloud, leaf_size)` → new PCD file | a new `clouds` row with `derived_from_cloud_id`; `jobs.result_cloud_id` |
+| `cluster` | `pclapp.euclidean_cluster(cloud, tolerance, min_size, max_size)` | one `clusters` row per cluster, largest first |
+
+Each runner is split into `compute()` (outside any transaction, returns a plain result) and
+`apply()` (inside the finishing transaction, writes rows). A derived cloud's file is moved into
+place before its row is committed, like an upload, and removed again if the commit fails.
+
+`pclapp` sits behind a four-method `Processor` protocol (`worker/processor.py`). The real
+implementation is `worker/pclapp_processor.py`; tests use a pure-Python fake
+(`tests/fake_processor.py`) so the queue, retry and concurrency tests run without PCL.
+`python -m worker.main --processor tests.fake_processor:FakeProcessor` runs the fake for real.
+
 ## Schema
 
 ```
@@ -135,6 +189,7 @@ Indexes, each with its one-sentence reason:
 ## Decisions
 
 - **Postgres as the job queue, not Celery/Redis.** One fewer service to run and explain; `FOR UPDATE SKIP LOCKED` gives exactly-once claiming across workers, and a concurrency test proves it.
+- **Retry by putting the row back.** A failed attempt with attempts left sets `status = 'queued'` again (the error stays on the row for inspection); the claim query picks it up like any other job. Permanent failures — bad params, deleted cloud — skip the retries.
 - **Sync SQLAlchemy.** Endpoints are plain `def`, so FastAPI runs them in its threadpool; the worker is a plain loop. Async would add a second set of APIs for no throughput we need.
 - **SHA-256 for API keys, not bcrypt.** Keys are 32 random bytes; bcrypt's slowness defends low-entropy passwords against guessing, which does not apply here, and it would cost latency on every request.
 - **One FK for lineage.** `jobs.result_cloud_id` points at the derived cloud; `clouds` does not point back at the job, which keeps the two tables from depending on each other.

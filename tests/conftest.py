@@ -26,7 +26,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 TEST_DATABASE_URL = os.environ.get(
     "PCLAPP_TEST_DATABASE_URL",
@@ -41,9 +41,14 @@ os.environ["PCLAPP_DATA_DIR"] = str(_DATA_DIR)
 os.environ["PCLAPP_WORKER_POLL_SECONDS"] = "0.05"
 
 from app import auth  # noqa: E402
+from app.config import get_settings  # noqa: E402
 from app.db import get_session  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.models import Base, User  # noqa: E402
+from app.storage import get_storage  # noqa: E402
+from tests.fake_processor import FakeProcessor  # noqa: E402
+from worker.main import Worker  # noqa: E402
+from worker.processor import Processor  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -168,3 +173,22 @@ def make_committed_actor(committed_db: Session) -> MakeActor:
 @pytest.fixture
 def admin_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {ADMIN_KEY}"}
+
+
+# --- worker ---------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def make_worker(engine: Engine, data_dir: Path) -> Callable[..., Worker]:
+    """A Worker with its own sessions on ``engine`` (so it sees only committed rows)."""
+
+    def make(processor: Processor | None = None, worker_id: str = "test-worker") -> Worker:
+        return Worker(
+            sessionmaker(bind=engine, expire_on_commit=False),
+            processor or FakeProcessor(),
+            get_storage(),
+            get_settings(),
+            worker_id=worker_id,
+        )
+
+    return make
