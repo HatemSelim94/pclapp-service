@@ -1,5 +1,7 @@
 # pclapp-service
 
+[![CI](https://github.com/HatemSelim94/pclapp-service/actions/workflows/ci.yml/badge.svg)](https://github.com/HatemSelim94/pclapp-service/actions/workflows/ci.yml)
+
 A small, production-shaped REST backend around the [PCL-App](https://github.com/HatemSelim94/PCL-App)
 Python package: upload point clouds, queue processing jobs, store results and metadata in
 PostgreSQL, fetch them over HTTP.
@@ -16,7 +18,21 @@ pytest against a real Postgres · ruff + mypy (strict) · Docker Compose · GitH
 | M2 | cloud upload / list / get / download / delete, keyset pagination, access rules | done |
 | M3 | jobs API, worker with `FOR UPDATE SKIP LOCKED`, `summarize` / `downsample` / `cluster` runners | done |
 | M4 | shares and access rules | done |
-| M5 | Docker Compose + CI | — |
+| M5 | Docker Compose (db, migrate, api, worker) + CI with the end-to-end smoke test | done |
+
+## Run it
+
+```bash
+git clone https://github.com/HatemSelim94/pclapp-service && cd pclapp-service
+echo "PCLAPP_ADMIN_KEY=$(openssl rand -hex 16)" > .env
+docker compose up --build          # db → migrate → api :8000 + worker
+PCLAPP_ADMIN_KEY=$(cut -d= -f2 .env) scripts/smoke.sh
+```
+
+The worker image compiles `pclapp` against PCL (a few minutes the first time). `scripts/smoke.sh`
+creates a user and key, uploads `tests/data/sample_objects.pcd`, waits for the summarize job
+(3630 points), runs a cluster job (2000 / 1200 / 400 points) and a downsample job, and downloads
+the derived cloud. CI runs the same script after `docker compose up`.
 
 ## Run it (development)
 
@@ -127,6 +143,20 @@ Two fixture tiers: most tests run inside one transaction that is rolled back (fa
 tests that need rows visible from other connections — two workers racing on `SKIP LOCKED`,
 the migration round-trip — commit for real and truncate afterwards.
 
+## Compose and CI
+
+`docker-compose.yml` has four services: `db` (postgres:16 with `pg_isready` healthcheck),
+`migrate` (the api image running `alembic upgrade head` once `db` is healthy), `api` and
+`worker` (both wait for `migrate` to complete). Migrations as a one-shot service rather than
+inside the api's start command means the api and the worker never race each other to the
+schema, and `docker compose up --scale worker=3` just works. `stop_grace_period: 60s` gives a
+running job time to finish after SIGTERM.
+
+`.github/workflows/ci.yml`, two jobs: **test** (ruff, mypy, pytest against a `postgres:16`
+service container, `alembic check`) and **compose** (build both images with layer caching,
+`docker compose up`, `scripts/smoke.sh`, `docker compose down`). The compose job is where the
+real PCL code path is exercised; the unit tests use the fake processor.
+
 ## Jobs and the worker
 
 Uploading a cloud enqueues a `summarize` job; clients enqueue `downsample` and `cluster`.
@@ -210,5 +240,6 @@ app/        FastAPI app: config, db, models, schemas, auth, routers/
 worker/     claim–run–finish loop and the job runners (the only code importing pclapp)
 alembic/    migrations, hand-reviewed
 tests/      pytest, against Postgres
-docker/     Dockerfiles for api and worker
+docker/     api.Dockerfile (python:3.12-slim), worker.Dockerfile (ubuntu:24.04 + libpcl, two stages)
+scripts/    smoke.sh — end-to-end check against a running stack
 ```

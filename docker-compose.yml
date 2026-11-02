@@ -1,0 +1,72 @@
+# One command to run the whole thing:
+#
+#   docker compose up --build
+#
+# db       PostgreSQL 16 with a healthcheck
+# migrate  one-shot: `alembic upgrade head`, runs once db is healthy
+# api      uvicorn on :8000, starts after migrate has finished
+# worker   the job worker (needs PCL, so it has its own, larger image)
+#
+# Set PCLAPP_ADMIN_KEY in .env (or the environment) before the first `up`; everything
+# else has a usable default for local use.
+
+name: pclapp-service
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: pclapp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pclapp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: pclapp-service-api
+    command: ["alembic", "upgrade", "head"]
+    environment: &app-env
+      PCLAPP_DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/pclapp
+      PCLAPP_DATA_DIR: /data
+      PCLAPP_ADMIN_KEY: ${PCLAPP_ADMIN_KEY:-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    image: pclapp-service-api
+    environment: *app-env
+    ports:
+      - "${PCLAPP_PORT:-8000}:8000"
+    volumes:
+      - clouds:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    image: pclapp-service-worker
+    environment:
+      <<: *app-env
+      PCLAPP_PROCESSOR: pclapp
+    volumes:
+      - clouds:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 60s   # let a running job finish after SIGTERM
+
+volumes:
+  pgdata:
+  clouds:
