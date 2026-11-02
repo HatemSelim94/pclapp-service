@@ -105,7 +105,9 @@ def compute(snap: JobSnapshot, processor: Processor, storage: Storage) -> Result
         case JobType.downsample:
             assert isinstance(params, DownsampleParams)
             storage.ensure_dirs()
-            tmp = storage.root / "tmp" / f"{uuid.uuid4().hex}.part"
+            # pclapp picks the output format from the extension, so the temp file is
+            # already a .pcd; it only moves into clouds/ once the row is written.
+            tmp = storage.root / "tmp" / f"{uuid.uuid4().hex}.pcd"
             try:
                 summary = processor.downsample(
                     src, tmp, has_intensity=snap.has_intensity, leaf_size=params.leaf_size
