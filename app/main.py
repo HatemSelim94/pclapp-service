@@ -13,13 +13,13 @@ from app import auth, schemas
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.models import User
-from app.routers import users
+from app.routers import clouds, users
+from app.storage import get_storage
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = get_settings()
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    get_storage().ensure_dirs()
     yield
 
 
@@ -31,6 +31,7 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
     app.include_router(users.router)
+    app.include_router(clouds.router)
 
     @app.get("/me", response_model=schemas.UserOut, tags=["users"])
     def me(user: auth.CurrentUser) -> User:

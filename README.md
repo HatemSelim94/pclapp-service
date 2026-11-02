@@ -13,7 +13,7 @@ pytest against a real Postgres · ruff + mypy (strict) · Docker Compose · GitH
 | Milestone | | |
 |---|---|---|
 | M1 | skeleton, settings, schema + first migration, `/healthz`, users and API keys | done |
-| M2 | cloud upload / list / get / download / delete | — |
+| M2 | cloud upload / list / get / download / delete, keyset pagination, access rules | done |
 | M3 | jobs table, worker, `summarize` / `downsample` / `cluster` runners | — |
 | M4 | shares and access rules | — |
 | M5 | Docker Compose + CI | — |
@@ -38,7 +38,61 @@ curl -s -X POST localhost:8000/users -H "Authorization: Bearer $PCLAPP_ADMIN_KEY
 curl -s -X POST localhost:8000/users/<user-id>/api-keys -H "Authorization: Bearer $PCLAPP_ADMIN_KEY" \
      -H "content-type: application/json" -d '{"label":"laptop"}'
 curl -s localhost:8000/me -H "Authorization: Bearer pk_..."
+
+# upload a cloud (enqueues a 'summarize' job), list, download
+export KEY=pk_...
+curl -s -X POST localhost:8000/clouds -H "Authorization: Bearer $KEY" \
+     -F file=@tests/data/sample_objects.pcd -F name="sample scene"
+curl -s "localhost:8000/clouds?limit=20&q=sample" -H "Authorization: Bearer $KEY"
+curl -s localhost:8000/clouds/<cloud-id>/download -H "Authorization: Bearer $KEY" -o scene.pcd
 ```
+
+Interactive docs: `http://localhost:8000/docs`.
+
+## API
+
+Every endpoint except `/healthz` needs `Authorization: Bearer <key>`. Errors are `{"detail": ...}`.
+
+| | | |
+|---|---|---|
+| `POST` | `/users` | admin key · create a user |
+| `POST` | `/users/{id}/api-keys` | admin key · issue a key; the key is in the response once, the DB keeps its hash |
+| `GET` `DELETE` | `/users/{id}/api-keys[/{key_id}]` | admin key · list / revoke |
+| `GET` | `/me` | who owns this key |
+| `POST` | `/clouds` | multipart `file` (`.pcd`/`.txt`), `name?`, `intensity?` → 201; enqueues `summarize` |
+| `GET` | `/clouds?limit&cursor&q` | clouds you own or that are shared with you; keyset pagination (below) |
+| `GET` | `/clouds/{id}` | metadata incl. summary (once computed) and lineage |
+| `GET` | `/clouds/{id}/download` | the file |
+| `DELETE` | `/clouds/{id}` | owner only · soft delete |
+| `GET` | `/healthz` | `{"db": "ok", "data_dir": "ok"}` or 503 |
+
+Access, as one table (`app/access.py`):
+
+| action | owner | editor | viewer | stranger |
+|---|---|---|---|---|
+| read, download | ✓ | ✓ | ✓ | 404 |
+| create job | ✓ | ✓ | 403 | 404 |
+| share, delete | ✓ | 403 | 403 | 404 |
+
+### Keyset pagination
+
+`GET /clouds` returns `{"items": [...], "next_cursor": "..."}`; pass `next_cursor` back as
+`cursor` until it is `null`. The cursor encodes the `(created_at, id)` of the last row, and the
+next page is
+
+```sql
+SELECT ... FROM clouds
+WHERE deleted_at IS NULL AND (owner_id = :me OR EXISTS (shared with :me))
+  AND (created_at, id) < (:cursor_created_at, :cursor_id)
+ORDER BY created_at DESC, id DESC
+LIMIT :limit + 1;          -- the extra row says whether there is a next page
+```
+
+Why not `OFFSET`: a row inserted between two requests shifts every later page, so the client
+sees a row twice or misses one, and Postgres still reads and discards the skipped rows.
+The tuple comparison is served straight from `ix_clouds_owner_created`. `id` is part of the
+key because `created_at` can tie; the tuple cannot, so a walk never skips or repeats
+(`tests/test_clouds.py::test_keyset_pagination_is_stable_across_inserts` inserts rows mid-walk).
 
 ## Tests
 
@@ -86,7 +140,8 @@ Indexes, each with its one-sentence reason:
 - **One FK for lineage.** `jobs.result_cloud_id` points at the derived cloud; `clouds` does not point back at the job, which keeps the two tables from depending on each other.
 - **Soft delete.** `DELETE /clouds/{id}` sets `deleted_at`; a separate cleanup command removes files, so the request path never deletes from disk.
 - **Files and rows.** The filesystem is not transactional, so: write to a temp path → insert row → commit → rename into place; on failure the temp file is removed. Orphans from a crash between commit and rename are what the cleanup command sweeps.
-- **404, not 403, for clouds you cannot see.** A 403 confirms the id exists.
+- **404, not 403, for clouds you cannot see.** A 403 confirms the id exists. Users who *can* see a cloud but lack a right get 403.
+- **`created_at` defaults to `clock_timestamp()`, not `now()`.** `now()` is the transaction start, so rows inserted in one transaction would tie; the keyset tie-breaker would cope, but "newest first" should mean what it says.
 
 ## Layout
 

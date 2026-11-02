@@ -25,10 +25,17 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     func,
+    select,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, DOUBLE_PRECISION, JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    column_property,
+    mapped_column,
+    relationship,
+)
 
 Vec3 = ARRAY(DOUBLE_PRECISION, dimensions=1)
 
@@ -65,7 +72,12 @@ def _uuid_pk() -> Mapped[uuid.UUID]:
 
 
 def _created_at() -> Mapped[datetime]:
-    return mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # clock_timestamp(), not now(): now() is the *transaction* start, so several rows
+    # inserted in one transaction would tie on created_at. The tie-breaker in the keyset
+    # cursor would still cope, but "newest first" should mean what it says.
+    return mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
 
 
 class User(Base):
@@ -204,3 +216,11 @@ class Share(Base):
     role: Mapped[ShareRole] = mapped_column(_pg_enum(ShareRole, "share_role"), nullable=False)
     granted_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = _created_at()
+
+
+# Lineage in the other direction, read-only: the job that produced this cloud, if any.
+# A correlated subquery rather than a second FK column (see Cloud.derived_from_cloud_id).
+Cloud.derived_by_job_id = column_property(
+    select(Job.id).where(Job.result_cloud_id == Cloud.id).correlate_except(Job).scalar_subquery(),
+    deferred=False,
+)

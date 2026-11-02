@@ -21,7 +21,8 @@ branch_labels: Sequence[str] | None = None
 depends_on: Sequence[str] | None = None
 
 VEC3 = postgresql.ARRAY(sa.DOUBLE_PRECISION(), dimensions=1)
-NOW = sa.text("now()")
+# clock_timestamp(): the real insert time, not the transaction start (see models._created_at)
+NOW = sa.text("clock_timestamp()")
 
 job_type = sa.Enum("summarize", "downsample", "cluster", name="job_type")
 job_status = sa.Enum("queued", "running", "done", "failed", name="job_status")
