@@ -164,3 +164,19 @@ class JobOut(ORMModel):
 class JobPage(BaseModel):
     items: list[JobOut]
     next_cursor: str | None = None
+
+
+# --- shares --------------------------------------------------------------------------------
+
+
+class ShareCreate(BaseModel):
+    user_id: uuid.UUID
+    role: Literal["viewer", "editor"]
+
+
+class ShareOut(ORMModel):
+    cloud_id: uuid.UUID
+    user_id: uuid.UUID
+    role: str
+    granted_by: uuid.UUID
+    created_at: datetime

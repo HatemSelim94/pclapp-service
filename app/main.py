@@ -13,7 +13,7 @@ from app import auth, schemas
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.models import User
-from app.routers import clouds, jobs, users
+from app.routers import clouds, jobs, shares, users
 from app.storage import get_storage
 
 
@@ -33,6 +33,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(clouds.router)
     app.include_router(jobs.router)
+    app.include_router(shares.router)
 
     @app.get("/me", response_model=schemas.UserOut, tags=["users"])
     def me(user: auth.CurrentUser) -> User:

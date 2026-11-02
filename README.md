@@ -15,7 +15,7 @@ pytest against a real Postgres · ruff + mypy (strict) · Docker Compose · GitH
 | M1 | skeleton, settings, schema + first migration, `/healthz`, users and API keys | done |
 | M2 | cloud upload / list / get / download / delete, keyset pagination, access rules | done |
 | M3 | jobs API, worker with `FOR UPDATE SKIP LOCKED`, `summarize` / `downsample` / `cluster` runners | done |
-| M4 | shares and access rules | — |
+| M4 | shares and access rules | done |
 | M5 | Docker Compose + CI | — |
 
 ## Run it (development)
@@ -76,15 +76,20 @@ Every endpoint except `/healthz` needs `Authorization: Bearer <key>`. Errors are
 | `POST` | `/clouds/{id}/jobs` | owner/editor · `{"type": "downsample", "params": {"leaf_size": 0.05}}` or `{"type": "cluster", "params": {"tolerance", "min_size", "max_size"}}` → 202 |
 | `GET` | `/jobs/{id}` | status, attempts, timings, error, `result_cloud_id`, `clusters` |
 | `GET` | `/clouds/{id}/jobs?limit&cursor` | a cloud's jobs, newest first |
+| `GET` `POST` | `/clouds/{id}/shares` | owner only · list / grant `{"user_id", "role": "viewer"\|"editor"}`; granting again changes the role |
+| `DELETE` | `/clouds/{id}/shares/{user_id}` | owner only · revoke |
 | `GET` | `/healthz` | `{"db": "ok", "data_dir": "ok"}` or 503 |
 
-Access, as one table (`app/access.py`):
+Access, as one table (`app/access.py`; `tests/test_access.py` runs every cell over HTTP):
 
 | action | owner | editor | viewer | stranger |
 |---|---|---|---|---|
-| read, download | ✓ | ✓ | ✓ | 404 |
+| read, download, list jobs | ✓ | ✓ | ✓ | 404 |
 | create job | ✓ | ✓ | 403 | 404 |
-| share, delete | ✓ | 403 | 403 | 404 |
+| list/grant/revoke shares, delete | ✓ | 403 | 403 | 404 |
+
+A shared cloud shows up in the grantee's `GET /clouds`; its jobs and results are visible to
+anyone who can read the cloud. Soft-deleted clouds are 404 for everyone, owner included.
 
 ### Keyset pagination
 
