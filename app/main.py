@@ -2,10 +2,11 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -34,6 +35,11 @@ def create_app() -> FastAPI:
     app.include_router(clouds.router)
     app.include_router(jobs.router)
     app.include_router(shares.router)
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        """A 60-line page that lists clouds and jobs and follows running jobs over SSE."""
+        return FileResponse(Path(__file__).parent / "static" / "index.html")
 
     @app.get("/me", response_model=schemas.UserOut, tags=["users"])
     def me(user: auth.CurrentUser) -> User:

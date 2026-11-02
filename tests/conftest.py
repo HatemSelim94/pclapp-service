@@ -39,6 +39,9 @@ os.environ["PCLAPP_DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["PCLAPP_ADMIN_KEY"] = ADMIN_KEY
 os.environ["PCLAPP_DATA_DIR"] = str(_DATA_DIR)
 os.environ["PCLAPP_WORKER_POLL_SECONDS"] = "0.05"
+os.environ["PCLAPP_SSE_POLL_SECONDS"] = "0.05"
+os.environ["PCLAPP_SSE_KEEPALIVE_SECONDS"] = "0.2"
+os.environ["PCLAPP_SSE_MAX_SECONDS"] = "5"
 
 from app import auth  # noqa: E402
 from app.config import get_settings  # noqa: E402

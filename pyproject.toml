@@ -32,6 +32,7 @@ dev = [
 
 [project.scripts]
 pclapp-worker = "worker.main:main"
+pclapp-cleanup = "app.cleanup:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -42,6 +43,8 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "worker"]
+# packages= already includes app/static/*.html; listed for clarity
+artifacts = ["app/static/*.html"]
 
 [tool.ruff]
 line-length = 100

@@ -79,3 +79,10 @@ def test_key_hash_is_sha256_and_keys_are_unique() -> None:
     assert a != b
     assert len(auth.hash_key(a)) == 64
     assert auth.hash_key(a) != auth.hash_key(b)
+
+
+def test_index_page_is_served_without_a_key(client: TestClient) -> None:
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "pclapp-service" in r.text

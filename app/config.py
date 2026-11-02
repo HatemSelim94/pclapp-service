@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     worker_poll_seconds: float = Field(default=1.0, gt=0)
     worker_max_attempts: int = Field(default=3, ge=1)
 
+    # GET /jobs/{id}/events (server-sent events)
+    sse_poll_seconds: float = Field(default=1.0, gt=0)
+    sse_keepalive_seconds: float = Field(default=15.0, gt=0)
+    sse_max_seconds: float = Field(default=600.0, gt=0)
+
 
 @lru_cache
 def get_settings() -> Settings:

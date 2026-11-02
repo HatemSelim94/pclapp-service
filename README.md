@@ -19,6 +19,8 @@ pytest against a real Postgres · ruff + mypy (strict) · Docker Compose · GitH
 | M3 | jobs API, worker with `FOR UPDATE SKIP LOCKED`, `summarize` / `downsample` / `cluster` runners | done |
 | M4 | shares and access rules | done |
 | M5 | Docker Compose (db, migrate, api, worker) + CI with the end-to-end smoke test | done |
+| M6 | `GET /jobs/{id}/events` (server-sent events), `pclapp-cleanup` command | done |
+| M7 | a plain HTML page at `/` listing clouds and jobs, following running jobs live | done |
 
 ## Run it
 
@@ -92,9 +94,11 @@ Every endpoint except `/healthz` needs `Authorization: Bearer <key>`. Errors are
 | `POST` | `/clouds/{id}/jobs` | owner/editor · `{"type": "downsample", "params": {"leaf_size": 0.05}}` or `{"type": "cluster", "params": {"tolerance", "min_size", "max_size"}}` → 202 |
 | `GET` | `/jobs/{id}` | status, attempts, timings, error, `result_cloud_id`, `clusters` |
 | `GET` | `/clouds/{id}/jobs?limit&cursor` | a cloud's jobs, newest first |
+| `GET` | `/jobs/{id}/events` | server-sent events: a `status` event per change, `end` when final, `timeout` after `PCLAPP_SSE_MAX_SECONDS` |
 | `GET` `POST` | `/clouds/{id}/shares` | owner only · list / grant `{"user_id", "role": "viewer"\|"editor"}`; granting again changes the role |
 | `DELETE` | `/clouds/{id}/shares/{user_id}` | owner only · revoke |
 | `GET` | `/healthz` | `{"db": "ok", "data_dir": "ok"}` or 503 |
+| `GET` | `/` | the HTML page (no framework, ~80 lines): paste a key, list clouds, upload, run jobs, watch them finish |
 
 Access, as one table (`app/access.py`; `tests/test_access.py` runs every cell over HTTP):
 
@@ -193,6 +197,18 @@ twice — `tests/test_worker.py` runs two workers in threads over twenty jobs an
 Each runner is split into `compute()` (outside any transaction, returns a plain result) and
 `apply()` (inside the finishing transaction, writes rows). A derived cloud's file is moved into
 place before its row is committed, like an upload, and removed again if the commit fails.
+
+`GET /jobs/{id}/events` streams the job as server-sent events. It polls the row once a second in
+its own short session (the request's session is not held open), emits `status` whenever
+`(status, attempts)` changes, a `: keepalive` comment in between, and `end` when the job is done
+or failed. Polling rather than `LISTEN/NOTIFY` keeps the worker unaware of who is watching; at
+this scale a one-second poll is free. The page at `/` reads it with `fetch` because `EventSource`
+cannot send an `Authorization` header.
+
+`pclapp-cleanup [--grace-hours 24] [--dry-run]` removes what the request path leaves behind on
+purpose: files of soft-deleted clouds, orphan files in `clouds/` with no row (a crash between
+rename and commit), and leftovers in `tmp/`. Anything younger than the grace period is left alone
+so nothing in flight is touched; rows are never deleted. `docker compose run --rm api pclapp-cleanup`.
 
 `pclapp` sits behind a four-method `Processor` protocol (`worker/processor.py`). The real
 implementation is `worker/pclapp_processor.py`; tests use a pure-Python fake

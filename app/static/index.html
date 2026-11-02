@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>pclapp-service</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; color: #222; }
+  table { border-collapse: collapse; width: 100%; margin: .5rem 0 1.5rem; }
+  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #ddd; }
+  tr.cloud { cursor: pointer; } tr.cloud:hover, tr.selected { background: #f3f6fa; }
+  .queued { color: #888; } .running { color: #b36b00; } .done { color: #0a7f3f; } .failed { color: #b00020; }
+  input, button, select { font: inherit; padding: .25rem .4rem; } #err { color: #b00020; }
+</style>
+<h1>pclapp-service</h1>
+<p>API key <input id="key" size="50" placeholder="pk_…"> <button onclick="loadClouds()">Load</button>
+   &nbsp; upload <input id="file" type="file" accept=".pcd,.txt"> <button onclick="upload()">Upload</button>
+   <span id="err"></span></p>
+<table><thead><tr><th>Cloud</th><th>Format</th><th>Points</th><th>Created</th></tr></thead><tbody id="clouds"></tbody></table>
+<div id="jobsBox" hidden>
+  <p><b id="selName"></b>
+     <select id="type"><option>summarize</option><option>downsample</option><option>cluster</option></select>
+     <input id="params" size="40" value='{"leaf_size": 0.1}'> <button onclick="createJob()">Run job</button></p>
+  <table><thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Attempts</th><th>Result</th></tr></thead><tbody id="jobs"></tbody></table>
+</div>
+<script>
+  const $ = id => document.getElementById(id); let selected = null; const streams = new Set();
+  $('key').value = localStorage.getItem('key') || '';
+  const api = async (path, opts = {}) => {
+    localStorage.setItem('key', $('key').value);
+    const r = await fetch(path, { ...opts, headers: { Authorization: 'Bearer ' + $('key').value, ...(opts.headers || {}) } });
+    if (!r.ok) throw new Error(`${r.status} ${(await r.json()).detail || ''}`);
+    return r.status === 204 ? null : r.json();
+  };
+  const show = e => $('err').textContent = e ? e.message || e : '';
+  async function loadClouds() {
+    try { show(); const page = await api('/clouds?limit=100'); $('clouds').innerHTML = '';
+      for (const c of page.items) {
+        const tr = $('clouds').insertRow(); tr.className = 'cloud'; tr.onclick = () => selectCloud(c, tr);
+        tr.innerHTML = `<td>${c.name}</td><td>${c.format}</td><td>${c.point_count ?? '…'}</td><td>${c.created_at.slice(0, 19)}</td>`;
+      } } catch (e) { show(e); }
+  }
+  async function selectCloud(c, tr) {
+    selected = c; document.querySelectorAll('tr.selected').forEach(t => t.classList.remove('selected')); tr.classList.add('selected');
+    $('selName').textContent = c.name; $('jobsBox').hidden = false; await loadJobs();
+  }
+  async function loadJobs() {
+    streams.forEach(ctl => ctl.abort()); streams.clear(); $('jobs').innerHTML = '';
+    const page = await api(`/clouds/${selected.id}/jobs?limit=100`);
+    for (const j of page.items) { renderJob(j); if (j.status === 'queued' || j.status === 'running') follow(j.id); }
+  }
+  function renderJob(j) {
+    const result = j.status === 'failed' ? j.error.split('\n')[0] : j.result_cloud_id ? 'cloud ' + j.result_cloud_id.slice(0, 8)
+      : j.clusters.length ? j.clusters.map(c => c.size).join(', ') + ' points' : '';
+    const html = `<td>${j.id.slice(0, 8)}</td><td>${j.type}</td><td class="${j.status}">${j.status}</td><td>${j.attempts}/${j.max_attempts}</td><td>${result}</td>`;
+    let tr = $('jobs').querySelector(`[data-id="${j.id}"]`);
+    if (!tr) { tr = $('jobs').insertRow(0); tr.dataset.id = j.id; } tr.innerHTML = html;
+  }
+  async function follow(id) {   // read the SSE stream with fetch (EventSource cannot send the Authorization header)
+    const ctl = new AbortController(); streams.add(ctl);
+    const r = await fetch(`/jobs/${id}/events`, { headers: { Authorization: 'Bearer ' + $('key').value }, signal: ctl.signal });
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader(); let buf = '';
+    for (;;) { const { value, done } = await reader.read(); if (done) break; buf += value;
+      let i; while ((i = buf.indexOf('\n\n')) >= 0) { const msg = buf.slice(0, i); buf = buf.slice(i + 2);
+        const m = msg.match(/^event: (\w+)\ndata: (.*)$/s); if (!m) continue;
+        if (m[1] === 'status') renderJob(JSON.parse(m[2])); if (m[1] === 'end') { loadClouds(); } } }
+    streams.delete(ctl);
+  }
+  async function createJob() {
+    try { show(); const body = { type: $('type').value, params: $('type').value === 'summarize' ? {} : JSON.parse($('params').value) };
+      const j = await api(`/clouds/${selected.id}/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      renderJob(j); follow(j.id); } catch (e) { show(e); }
+  }
+  async function upload() {
+    try { show(); const f = $('file').files[0]; if (!f) throw new Error('choose a file'); const fd = new FormData(); fd.append('file', f);
+      await api('/clouds', { method: 'POST', body: fd }); await loadClouds(); } catch (e) { show(e); }
+  }
+  $('type').onchange = () => $('params').value = { summarize: '{}', downsample: '{"leaf_size": 0.1}', cluster: '{"tolerance": 0.15, "min_size": 50, "max_size": 5000}' }[$('type').value];
+  if ($('key').value) loadClouds();
+</script>
+</html>
