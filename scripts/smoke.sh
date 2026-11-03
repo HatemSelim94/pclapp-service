@@ -4,7 +4,7 @@
 #   scripts/smoke.sh [base-url]        default http://localhost:8000
 #
 # Needs PCLAPP_ADMIN_KEY in the environment (the one the stack was started with), curl,
-# and python3 for JSON. Creates a user and a key, uploads the sample cloud, waits for the
+# and python for JSON. On Windows run it from Git Bash. Creates a user and a key, uploads the sample cloud, waits for the
 # automatic summarize job, then runs a cluster job and checks the three known objects.
 # Exits non-zero on the first mismatch. CI runs this after `docker compose up`.
 
@@ -17,7 +17,9 @@ SAMPLE="${SMOKE_SAMPLE:-$(dirname "$0")/../tests/data/sample_objects.pcd}"
 EXPECT_POINTS="${SMOKE_EXPECT_POINTS:-3630}"
 EXPECT_SIZES="${SMOKE_EXPECT_SIZES:-[2000, 1200, 400]}"
 
-json() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1], {}, {'d': d}))" "$1"; }
+# Windows (Git Bash) has "python", Linux has "python3".
+PY=$(command -v python3 || command -v python)
+json() { "$PY" -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1], {}, {'d': d}))" "$1"; }
 step() { printf '\n== %s\n' "$*"; }
 
 step "wait for /healthz"
@@ -75,7 +77,7 @@ DS_JOB=$(curl -fsS -X POST "$BASE/clouds/$CLOUD_ID/jobs" "${AUTH[@]}" \
 DERIVED=$(wait_job "$DS_JOB" | json "d['result_cloud_id']")
 DERIVED_POINTS=$(curl -fsS "$BASE/clouds/$DERIVED" "${AUTH[@]}" | json "d['point_count']")
 echo "derived cloud $DERIVED has $DERIVED_POINTS points"
-python3 -c "import sys; n=int(sys.argv[1]); sys.exit(0 if 0 < n < int(sys.argv[2]) else 1)" "$DERIVED_POINTS" "$EXPECT_POINTS"
+"$PY" -c "import sys; n=int(sys.argv[1]); sys.exit(0 if 0 < n < int(sys.argv[2]) else 1)" "$DERIVED_POINTS" "$EXPECT_POINTS"
 curl -fsS "$BASE/clouds/$DERIVED/download" "${AUTH[@]}" -o /tmp/derived.pcd
 [ -s /tmp/derived.pcd ] || { echo "download is empty" >&2; exit 1; }
 

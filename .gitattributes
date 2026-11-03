@@ -1,0 +1,4 @@
+# Keep LF everywhere, also on Windows checkouts: scripts run in Git Bash / containers,
+# and Dockerfiles, YAML and Python are all happier without CRLF.
+* text=auto eol=lf
+*.pcd binary
