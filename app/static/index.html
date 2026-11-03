@@ -11,7 +11,7 @@
   input, button, select { font: inherit; padding: .25rem .4rem; } #err { color: #b00020; }
 </style>
 <h1>pclapp-service</h1>
-<p>API key <input id="key" size="50" placeholder="pk_…"> <button onclick="loadClouds()">Load</button>
+<p>API key <input id="key" type="password" size="50" placeholder="pk_…"> <button onclick="loadClouds()">Load</button>
    &nbsp; upload <input id="file" type="file" accept=".pcd,.txt"> <button onclick="upload()">Upload</button>
    <span id="err"></span></p>
 <table><thead><tr><th>Cloud</th><th>Format</th><th>Points</th><th>Created</th></tr></thead><tbody id="clouds"></tbody></table>

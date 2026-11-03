@@ -10,6 +10,172 @@ PostgreSQL, fetch them over HTTP.
 a worker process that claims jobs from a `jobs` table with `FOR UPDATE SKIP LOCKED` · API keys ·
 pytest against a real Postgres · ruff + mypy (strict) · Docker Compose · GitHub Actions.
 
+## What it does
+
+A client uploads a point cloud (`.pcd` or `.txt`) and gets a cloud id back. The upload itself
+queues a `summarize` job; the client can queue `downsample` and `cluster` jobs on top. A separate
+worker process picks jobs out of the `jobs` table, runs the geometry through `pclapp` (PCL
+underneath) and writes the results back: point count, bounding box and centroid onto the cloud
+row, a new *derived* cloud for a downsample, one `clusters` row per cluster. Clients poll
+`GET /jobs/{id}` or follow a job live over server-sent events. Owners can share a cloud with
+other users as viewer or editor; everyone else gets a 404.
+
+The HTML page at `/` is the whole API in one screen — here with two clouds, a downsample
+running and a cluster job waiting behind it:
+
+![Clouds, one job running, one queued](docs/page-running.png)
+
+…and a few seconds later, both finished: the cluster job found the three objects in the sample
+scene (2000, 1200 and 400 points), the downsample produced a new cloud that is listed like any
+other and can itself be processed again:
+
+![Both jobs done, derived cloud in the list](docs/page-done.png)
+
+### Architecture
+
+Two processes share one database and one file volume. The API never touches PCL and the worker
+never touches HTTP; the `jobs` table is the only thing between them.
+
+```mermaid
+flowchart TB
+    client["client<br/>curl · browser page · any HTTP client"]
+    subgraph api["api  (FastAPI, uvicorn)"]
+        routers["routers<br/>users · clouds · jobs · shares"]
+        access["access rules<br/>owner / editor / viewer / 404"]
+        storage["storage<br/>tmp → rename → commit"]
+    end
+    subgraph pg["PostgreSQL 16"]
+        tables[("users · api_keys · clouds<br/>jobs · clusters · shares")]
+    end
+    subgraph worker["worker  (plain process, N instances)"]
+        loop["claim – run – finish loop<br/>FOR UPDATE SKIP LOCKED"]
+        runners["runners<br/>summarize · downsample · cluster"]
+        pclapp["pclapp (PCL)"]
+    end
+    volume[("/data volume<br/>clouds/&lt;uuid&gt;.pcd")]
+
+    client -- "Bearer pk_…" --> routers --> access --> tables
+    routers --> storage --> volume
+    loop <--> tables
+    loop --> runners --> pclapp
+    runners <--> volume
+    client -. "GET /jobs/{id}/events (SSE)" .-> routers
+```
+
+### Life of a job
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as client
+    participant A as api
+    participant DB as PostgreSQL
+    participant FS as /data
+    participant W as worker
+
+    C->>A: POST /clouds (multipart file)
+    A->>FS: stream to tmp/, rename to clouds/<uuid>.pcd
+    A->>DB: INSERT cloud + INSERT job(summarize, queued) — one transaction
+    A-->>C: 201 {cloud}
+    C->>A: POST /clouds/{id}/jobs {type: cluster, params}
+    A->>DB: INSERT job(cluster, queued)
+    A-->>C: 202 {job}
+
+    loop every poll interval
+        W->>DB: SELECT … WHERE status='queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+        DB-->>W: one row (or none) — other workers skip it
+        W->>DB: UPDATE status='running', attempts+1, worker_id, then COMMIT
+        W->>FS: read cloud file
+        Note over W: pclapp runs here, with no transaction open
+        W->>DB: UPDATE status='done' + INSERT clusters / derived cloud, then COMMIT
+    end
+
+    C->>A: GET /jobs/{id}  (or /events)
+    A->>DB: SELECT job + clusters
+    A-->>C: {status: done, clusters: [...]}
+```
+
+### Job states
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: POST /clouds or POST /clouds/{id}/jobs
+    queued --> running: worker claims it (SKIP LOCKED), attempts += 1
+    running --> done: result rows written
+    running --> queued: error, attempts < max_attempts (error kept on the row)
+    running --> failed: error, no attempts left
+    running --> failed: permanent — bad params, cloud deleted, file missing
+    done --> [*]
+    failed --> [*]
+```
+
+### Data model
+
+```mermaid
+erDiagram
+    users ||--o{ api_keys : "has"
+    users ||--o{ clouds : "owns"
+    users ||--o{ shares : "is granted"
+    clouds ||--o{ shares : "shared via"
+    clouds ||--o{ jobs : "processed by"
+    clouds |o--o{ clouds : "derived_from"
+    jobs |o--o| clouds : "result_cloud"
+    jobs ||--o{ clusters : "found"
+
+    users {
+        uuid id PK
+        text name UK
+        timestamptz created_at
+    }
+    api_keys {
+        uuid id PK
+        uuid user_id FK
+        text key_hash UK
+        text key_prefix
+        timestamptz revoked_at
+    }
+    clouds {
+        uuid id PK
+        uuid owner_id FK
+        text name
+        text format
+        text path
+        bigint point_count
+        float8_3 bbox_min
+        float8_3 bbox_max
+        float8_3 centroid
+        uuid derived_from_cloud_id FK
+        timestamptz deleted_at
+    }
+    jobs {
+        uuid id PK
+        uuid cloud_id FK
+        job_type type
+        jsonb params
+        job_status status
+        int attempts
+        int max_attempts
+        text error
+        text worker_id
+        uuid result_cloud_id FK
+    }
+    clusters {
+        bigint id PK
+        uuid job_id FK
+        int index
+        int size
+        float8_3 bbox_min
+        float8_3 bbox_max
+        float8_3 centroid
+    }
+    shares {
+        uuid cloud_id PK
+        uuid user_id PK
+        share_role role
+        uuid granted_by FK
+    }
+```
+
 ## Status
 
 | Milestone | | |
@@ -258,4 +424,5 @@ alembic/    migrations, hand-reviewed
 tests/      pytest, against Postgres
 docker/     api.Dockerfile (python:3.12-slim), worker.Dockerfile (ubuntu:24.04 + libpcl, two stages)
 scripts/    smoke.sh — end-to-end check against a running stack
+docs/       screenshots used above
 ```
